@@ -72,6 +72,9 @@ use tokio_util::sync::{CancellationToken, DropGuard};
 use tracing::{Instrument, debug, debug_span, error, info, trace, warn};
 use tracker_comms::{TrackerComms, UdpTrackerClient};
 
+#[cfg(target_os = "linux")]
+use crate::netns_util::{NetNs, run_in_netns};
+
 pub const SUPPORTED_SCHEMES: [&str; 3] = ["http:", "https:", "magnet:"];
 
 pub type TorrentId = usize;
@@ -119,6 +122,10 @@ pub struct Session {
     pub(crate) connector: Arc<StreamConnector>,
     reqwest_client: reqwest::Client,
     udp_tracker_client: UdpTrackerClient,
+    #[cfg(target_os = "linux")]
+    netns_anon: Option<Arc<NetNs>>,
+    #[cfg(target_os = "linux")]
+    bind_device_name: Option<String>,
     disable_trackers: bool,
 
     // Lifecycle management
@@ -457,6 +464,14 @@ pub struct SessionOptions {
 
     /// Force IPv4 only.
     pub ipv4_only: bool,
+
+    /// Linux namespace name for anonymity-sensitive traffic setup.
+    /// Network namespace for anonymity-sensitive traffic (DHT, trackers, peer TCP/uTP).
+    /// Resolve with `netns_rs::NetNs::get(name)` at startup and pass the handle here.
+    #[cfg(target_os = "linux")]
+    pub netns_anon: Option<std::sync::Arc<crate::netns_util::NetNs>>,
+
+
 }
 
 fn torrent_file_from_info_bytes(info_bytes: &[u8], trackers: &[url::Url]) -> anyhow::Result<Bytes> {
@@ -514,6 +529,16 @@ impl Session {
         mut opts: SessionOptions,
     ) -> BoxFuture<'static, anyhow::Result<Arc<Self>>> {
         async move {
+            #[cfg(target_os = "linux")]
+            info!(
+                netns_anon = if opts.netns_anon.is_some() {
+                    "configured"
+                } else {
+                    "default"
+                },
+                "session network namespace assignments"
+            );
+
             let peer_id = opts
                 .peer_id
                 .unwrap_or_else(|| generate_azereus_style(*b"rQ", crate_version!()));
@@ -524,15 +549,36 @@ impl Session {
                 warn!("uploading disabled");
             }
 
+            #[cfg(target_os = "linux")]
+            let netns_anon = opts.netns_anon.clone();
             let bind_device = match opts.bind_device_name.as_ref() {
-                Some(name) => Some(
-                    BindDevice::new_from_name(name)
-                        .with_context(|| format!("error creating bind device {name}"))?,
-                ),
+                Some(name) => {
+                    #[cfg(target_os = "linux")]
+                    {
+                        let name = name.clone();
+                        let device = run_in_netns(netns_anon.as_ref(), move || {
+                            BindDevice::new_from_name(&name)
+                                .with_context(|| format!("error creating bind device {name}"))
+                        })
+                        .await?;
+                        Some(device)
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        Some(
+                            BindDevice::new_from_name(name)
+                                .with_context(|| format!("error creating bind device {name}"))?,
+                        )
+                    }
+                }
                 None => None,
             };
 
-            let listen_result = if let Some(listen_opts) = opts.listen.take() {
+            let listen_result = if let Some(mut listen_opts) = opts.listen.take() {
+                #[cfg(target_os = "linux")]
+                {
+                    listen_opts.netns = netns_anon.clone();
+                }
                 Some(
                     listen_opts
                         .start(
@@ -551,20 +597,66 @@ impl Session {
                 None
             } else {
                 let dht = if opts.disable_dht_persistence {
-                    DhtBuilder::with_config(DhtConfig {
-                        bootstrap_addrs: opts.dht_bootstrap_addrs.clone(),
-                        cancellation_token: Some(token.child_token()),
-                        bind_device: bind_device.as_ref(),
-                        ..Default::default()
-                    })
-                    .await
-                    .context("error initializing DHT")?
+                    #[cfg(target_os = "linux")]
+                    {
+                        let dht_socket = run_in_netns(netns_anon.as_ref(), move || {
+                            librqbit_dualstack_sockets::UdpSocket::bind_udp(
+                                (std::net::Ipv6Addr::UNSPECIFIED, 0).into(),
+                                librqbit_dualstack_sockets::BindOpts {
+                                    request_dualstack: true,
+                                    reuseport: false,
+                                    device: None,
+                                },
+                            )
+                            .map_err(|e| anyhow::anyhow!("error binding DHT socket: {e}"))
+                        })
+                        .await?;
+
+                        DhtBuilder::with_config(DhtConfig {
+                            bootstrap_addrs: opts.dht_bootstrap_addrs.clone(),
+                            cancellation_token: Some(token.child_token()),
+                            bind_device: bind_device.as_ref(),
+                            prebound_socket: Some(dht_socket),
+                            ..Default::default()
+                        })
+                        .await
+                        .context("error initializing DHT")?
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        DhtBuilder::with_config(DhtConfig {
+                            bootstrap_addrs: opts.dht_bootstrap_addrs.clone(),
+                            cancellation_token: Some(token.child_token()),
+                            bind_device: bind_device.as_ref(),
+                            ..Default::default()
+                        })
+                        .await
+                        .context("error initializing DHT")?
+                    }
                 } else {
                     let pdht_config = opts.dht_config.take().unwrap_or_default();
+                    #[cfg(target_os = "linux")]
+                    let dht_socket = Some(
+                        run_in_netns(netns_anon.as_ref(), move || {
+                            librqbit_dualstack_sockets::UdpSocket::bind_udp(
+                                (std::net::Ipv6Addr::UNSPECIFIED, 0).into(),
+                                librqbit_dualstack_sockets::BindOpts {
+                                    request_dualstack: true,
+                                    reuseport: false,
+                                    device: None,
+                                },
+                            )
+                            .map_err(|e| anyhow::anyhow!("error binding persistent DHT socket: {e}"))
+                        })
+                        .await?,
+                    );
+                    #[cfg(not(target_os = "linux"))]
+                    let dht_socket = None;
                     PersistentDht::create(
                         Some(pdht_config),
                         Some(token.clone()),
                         bind_device.as_ref(),
+                        dht_socket,
                     )
                     .await
                     .context("error initializing persistent DHT")?
@@ -649,7 +741,14 @@ impl Session {
                     let mut b = reqwest::Client::builder();
                     #[cfg(not(windows))]
                     if let Some(bd) = opts.bind_device_name.as_ref() {
-                        b = b.interface(bd);
+                        #[cfg(target_os = "linux")]
+                        if netns_anon.is_none() {
+                            b = b.interface(bd);
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        {
+                            b = b.interface(bd);
+                        }
                     }
                     b
                 };
@@ -663,6 +762,11 @@ impl Session {
                     socks_proxy_config: proxy_config,
                     utp_socket: listen_result.as_ref().and_then(|l| l.utp_socket.clone()),
                     bind_device: bind_device.clone(),
+                    tcp_connect_timeout: peer_opts
+                        .connect_timeout
+                        .unwrap_or_else(|| Duration::from_secs(10)),
+                    #[cfg(target_os = "linux")]
+                    netns_anon: netns_anon.clone(),
                     ipv4_only: opts.ipv4_only,
                 })
                 .await
@@ -691,6 +795,26 @@ impl Session {
                 None
             };
 
+            #[cfg(target_os = "linux")]
+            let udp_tracker_client = {
+                let tracker_socket = run_in_netns(netns_anon.as_ref(), move || {
+                    let addr = std::net::SocketAddr::new(
+                        std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+                        0,
+                    );
+                    librqbit_dualstack_sockets::UdpSocket::bind_udp(
+                        addr,
+                        librqbit_dualstack_sockets::BindOpts {
+                            device: None,
+                            ..Default::default()
+                        },
+                    )
+                    .map_err(|e| anyhow::anyhow!("error creating UDP tracker socket: {e}"))
+                })
+                .await?;
+                UdpTrackerClient::from_socket(token.clone(), tracker_socket)
+            };
+            #[cfg(not(target_os = "linux"))]
             let udp_tracker_client = UdpTrackerClient::new(token.clone(), bind_device.as_ref())
                 .await
                 .context("error creating UDP tracker client")?;
@@ -699,9 +823,26 @@ impl Session {
                 if opts.disable_local_service_discovery {
                     None
                 } else {
+                    let lsd_bind_device = {
+                        #[cfg(target_os = "linux")]
+                        {
+                            if netns_anon.is_some() {
+                                // LSD is local-LAN control-plane traffic in default namespace.
+                                // With anon netns configured, don't force anon bind device.
+                                None
+                            } else {
+                                bind_device.as_ref()
+                            }
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        {
+                            bind_device.as_ref()
+                        }
+                    };
+
                     LocalServiceDiscovery::new(LocalServiceDiscoveryOptions {
                         cancel_token: token.clone(),
-                        bind_device: bind_device.as_ref(),
+                        bind_device: lsd_bind_device,
                         ..Default::default()
                     })
                     .await
@@ -727,6 +868,10 @@ impl Session {
                 default_storage_factory: opts.default_storage_factory,
                 reqwest_client,
                 connector: stream_connector,
+                #[cfg(target_os = "linux")]
+                netns_anon: netns_anon.clone(),
+                #[cfg(target_os = "linux")]
+                bind_device_name: opts.bind_device_name.clone(),
                 root_span: opts.root_span,
                 stats: Arc::new(SessionStats::new()),
                 concurrent_initialize_semaphore: Arc::new(tokio::sync::Semaphore::new(
@@ -771,7 +916,22 @@ impl Session {
                     && let Some(announce_port) = listen.announce_port
                 {
                     info!(port = announce_port, "starting UPnP port forwarder");
-                    let bind_device = bind_device.clone();
+                    let bind_device = {
+                        #[cfg(target_os = "linux")]
+                        {
+                            if netns_anon.is_some() {
+                                // UPnP/SSDP is local-LAN control-plane traffic in the default namespace.
+                                // If anonymity netns is configured, don't force anon bind device here.
+                                None
+                            } else {
+                                bind_device.clone()
+                            }
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        {
+                            bind_device.clone()
+                        }
+                    };
                     session.spawn(
                         debug_span!(parent: session.rs(), "upnp_forward", port = announce_port),
                         "upnp_forward",
@@ -1494,6 +1654,10 @@ impl Session {
             self.announce_port().unwrap_or(4240),
             self.reqwest_client.clone(),
             self.udp_tracker_client.clone(),
+            #[cfg(target_os = "linux")]
+            self.netns_anon.clone(),
+            #[cfg(target_os = "linux")]
+            self.bind_device_name.clone(),
         );
 
         let initial_peers_rx = if initial_peers.is_empty() {

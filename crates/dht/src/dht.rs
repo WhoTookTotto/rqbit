@@ -1283,6 +1283,18 @@ pub struct DhtConfig<'a> {
     pub peer_store: Option<PeerStore>,
     pub cancellation_token: Option<CancellationToken>,
     pub bind_device: Option<&'a BindDevice>,
+    /// Pre-bound socket created in a specific network namespace; set via [`DhtConfig::with_socket`].
+    /// When set, `listen_addr` and `bind_device` are ignored for socket creation.
+    pub prebound_socket: Option<UdpSocket>,
+}
+
+impl<'a> DhtConfig<'a> {
+    /// Pre-supply an already-bound UDP socket (e.g. created inside a network namespace).
+    /// When set, `listen_addr` and `bind_device` are ignored for socket creation.
+    pub fn with_socket(mut self, socket: UdpSocket) -> Self {
+        self.prebound_socket = Some(socket);
+        self
+    }
 }
 
 impl DhtState {
@@ -1299,15 +1311,19 @@ impl DhtState {
             let addr = config
                 .listen_addr
                 .unwrap_or((Ipv6Addr::UNSPECIFIED, 0).into());
-            let socket = UdpSocket::bind_udp(
-                addr,
-                librqbit_dualstack_sockets::BindOpts {
-                    request_dualstack: true,
-                    reuseport: false,
-                    device: config.bind_device,
-                },
-            )
-            .map_err(|e| Error::Bind(Box::new(e)))?;
+            let socket = if let Some(sock) = config.prebound_socket.take() {
+                sock
+            } else {
+                UdpSocket::bind_udp(
+                    addr,
+                    librqbit_dualstack_sockets::BindOpts {
+                        request_dualstack: true,
+                        reuseport: false,
+                        device: config.bind_device,
+                    },
+                )
+                .map_err(|e| Error::Bind(Box::new(e)))?
+            };
 
             let listen_addr = socket.bind_addr();
             info!("DHT listening on {:?}", listen_addr);

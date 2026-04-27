@@ -21,6 +21,9 @@ use tracing::trace;
 use tracing::trace_span;
 use url::Url;
 
+#[cfg(target_os = "linux")]
+use netns_rs::NetNs;
+
 use crate::tracker_comms_http;
 use crate::tracker_comms_udp;
 use crate::tracker_comms_udp::UdpTrackerClient;
@@ -35,6 +38,10 @@ pub struct TrackerComms {
     // This MUST be set as trackers don't work with 0 port.
     announce_port: u16,
     reqwest_client: reqwest::Client,
+    #[cfg(target_os = "linux")]
+    netns_anon: Option<Arc<NetNs>>,
+    #[cfg(target_os = "linux")]
+    bind_device_name: Option<String>,
     key: u32,
 }
 
@@ -149,6 +156,8 @@ impl TrackerComms {
         announce_port: u16,
         reqwest_client: reqwest::Client,
         udp_client: UdpTrackerClient,
+        #[cfg(target_os = "linux")] netns_anon: Option<Arc<NetNs>>,
+        #[cfg(target_os = "linux")] bind_device_name: Option<String>,
     ) -> Option<BoxStream<'static, SocketAddr>> {
         let trackers = trackers
             .into_iter()
@@ -180,6 +189,10 @@ impl TrackerComms {
                 tx,
                 announce_port,
                 reqwest_client,
+                #[cfg(target_os = "linux")]
+                netns_anon,
+                #[cfg(target_os = "linux")]
+                bind_device_name,
                 key: rand::random(),
             });
             let mut futures = FuturesUnordered::new();
@@ -290,11 +303,52 @@ impl TrackerComms {
         }
         url.set_query(Some(&queries));
 
-        let response: reqwest::Response = self.reqwest_client.get(url).send().await?;
-        if !response.status().is_success() {
-            anyhow::bail!("tracker responded with {:?}", response.status());
-        }
-        let bytes = response.bytes().await?;
+        #[cfg(target_os = "linux")]
+        let bytes = if let Some(ns) = self.netns_anon.as_ref() {
+            let ns = ns.clone();
+            let url = url.clone();
+            let bind_device_name = self.bind_device_name.clone();
+            tokio::task::spawn_blocking(move || {
+                ns.run(|_| {
+                    let mut builder = reqwest::blocking::Client::builder();
+                    if let Some(bd) = bind_device_name.as_ref() {
+                        builder = builder.interface(bd);
+                    }
+                    let client = builder
+                        .build()
+                        .context("error building blocking HTTP tracker client")?;
+                    let response = client.get(url).send().context("error calling HTTP tracker")?;
+                    if !response.status().is_success() {
+                        anyhow::bail!("tracker responded with {:?}", response.status());
+                    }
+                    Ok::<Vec<u8>, anyhow::Error>(
+                        response
+                            .bytes()
+                            .context("error reading HTTP tracker response body")?
+                            .to_vec(),
+                    )
+                })
+                .map_err(|e| anyhow::anyhow!("netns enter failed for HTTP tracker: {e}"))?
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("spawn_blocking panicked for HTTP tracker: {e}"))??
+        } else {
+            let response: reqwest::Response = self.reqwest_client.get(url).send().await?;
+            if !response.status().is_success() {
+                anyhow::bail!("tracker responded with {:?}", response.status());
+            }
+            response.bytes().await?.to_vec()
+        };
+
+        #[cfg(not(target_os = "linux"))]
+        let bytes = {
+            let response: reqwest::Response = self.reqwest_client.get(url).send().await?;
+            if !response.status().is_success() {
+                anyhow::bail!("tracker responded with {:?}", response.status());
+            }
+            response.bytes().await?.to_vec()
+        };
+
         if let Ok((error, _)) =
             bencode::from_bytes_with_rest::<tracker_comms_http::TrackerError>(&bytes)
         {

@@ -115,6 +115,9 @@ thiserror.workspace = true
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = ["Win32", "Win32_System", "Win32_System_IO", "Win32_System_Ioctl"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+netns-rs = "0.2.0"
+
 [build-dependencies]
 anyhow.workspace = true
 

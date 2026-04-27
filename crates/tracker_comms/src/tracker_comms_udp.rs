@@ -279,6 +279,11 @@ impl UdpTrackerClient {
         )
         .with_context(|| format!("error creating UDP socket at {addr}"))?;
 
+        Ok(Self::from_socket(cancel_token, sock))
+    }
+
+    /// Create a client from a pre-bound UDP socket (e.g. created inside a network namespace).
+    pub fn from_socket(cancel_token: CancellationToken, sock: UdpSocket) -> Self {
         let client = Self {
             state: Arc::new(ClientShared {
                 sock,
@@ -291,7 +296,7 @@ impl UdpTrackerClient {
             async move { client.run().await }
         });
 
-        Ok(client)
+        client
     }
 
     async fn run(self) -> anyhow::Result<()> {

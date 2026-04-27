@@ -64,6 +64,9 @@ pub(crate) struct StreamConnectorArgs {
     pub socks_proxy_config: Option<SocksProxyConfig>,
     pub utp_socket: Option<Arc<UtpSocketUdp>>,
     pub bind_device: Option<BindDevice>,
+    pub tcp_connect_timeout: Duration,
+    #[cfg(target_os = "linux")]
+    pub netns_anon: Option<Arc<crate::netns_util::NetNs>>,
     pub ipv4_only: bool,
 }
 
@@ -130,6 +133,9 @@ pub(crate) struct StreamConnector {
     proxy_config: Option<SocksProxyConfig>,
     enable_tcp: bool,
     bind_device: Option<BindDevice>,
+    tcp_connect_timeout: Duration,
+    #[cfg(target_os = "linux")]
+    netns_anon: Option<Arc<crate::netns_util::NetNs>>,
     utp_socket: Option<Arc<librqbit_utp::UtpSocketUdp>>,
     stats: ConnectStatsAtomic,
     ipv4_only: bool,
@@ -156,6 +162,9 @@ impl StreamConnector {
             enable_tcp: config.enable_tcp,
             utp_socket: config.utp_socket,
             bind_device: config.bind_device,
+            tcp_connect_timeout: config.tcp_connect_timeout,
+            #[cfg(target_os = "linux")]
+            netns_anon: config.netns_anon,
             stats: Default::default(),
             ipv4_only: config.ipv4_only,
         })
@@ -187,6 +196,38 @@ impl StreamConnector {
         &self,
         addr: SocketAddr,
     ) -> librqbit_dualstack_sockets::Result<tokio::net::TcpStream> {
+        #[cfg(target_os = "linux")]
+        if let Some(ns) = self.netns_anon.as_ref() {
+            let ns = ns.clone();
+            let timeout = self.tcp_connect_timeout;
+            return self
+                .with_stat(ConnectionKind::Tcp, addr.is_ipv6(), async move {
+                    tokio::task::spawn_blocking(move || {
+                        ns.run(|_| {
+                            let std_stream = std::net::TcpStream::connect_timeout(&addr, timeout)
+                                .map_err(librqbit_dualstack_sockets::Error::Connect)?;
+                            std_stream
+                                .set_nonblocking(true)
+                                .map_err(librqbit_dualstack_sockets::Error::SetNonblocking)?;
+                            tokio::net::TcpStream::from_std(std_stream)
+                                .map_err(librqbit_dualstack_sockets::Error::TokioFromStd)
+                        })
+                        .map_err(|e| {
+                            librqbit_dualstack_sockets::Error::Connect(std::io::Error::other(
+                                format!("netns enter failed: {e}"),
+                            ))
+                        })?
+                    })
+                    .await
+                    .map_err(|e| {
+                        librqbit_dualstack_sockets::Error::Connect(std::io::Error::other(
+                            format!("spawn_blocking panicked: {e}"),
+                        ))
+                    })?
+                })
+                .await;
+        }
+
         self.with_stat(
             ConnectionKind::Tcp,
             addr.is_ipv6(),

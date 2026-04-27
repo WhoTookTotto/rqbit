@@ -30,6 +30,9 @@ use size_format::SizeFormatterBinary as SF;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug_span, error, info, trace_span, warn};
 
+#[cfg(target_os = "linux")]
+use netns_rs::NetNs;
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum LogLevel {
     Trace,
@@ -127,7 +130,7 @@ struct Opts {
     dht_bootstrap_addrs: Option<String>,
 
     /// The connect timeout, e.g. 1s, 1.5s, 100ms etc.
-    #[arg(long = "peer-connect-timeout", value_parser = parse_duration::parse, default_value="2s", env="RQBIT_PEER_CONNECT_TIMEOUT")]
+    #[arg(long = "peer-connect-timeout", value_parser = parse_duration::parse, default_value="5s", env="RQBIT_PEER_CONNECT_TIMEOUT")]
     peer_connect_timeout: Duration,
 
     /// The timeout for read() and write() operations, e.g. 1s, 1.5s, 100ms etc.
@@ -213,7 +216,7 @@ struct Opts {
     /// The higher the number, the more the memory usage.
     #[arg(
         long = "max-blocking-threads",
-        default_value = "8",
+        default_value = "64",
         env = "RQBIT_RUNTIME_MAX_BLOCKING_THREADS"
     )]
     max_blocking_threads: u16,
@@ -284,6 +287,11 @@ struct Opts {
     /// Disable trackers (for debugging DHT, LSD and --initial-peers)
     #[arg(long = "disable-trackers", env = "RQBIT_TRACKERS_DISABLE")]
     disable_trackers: bool,
+
+    /// Network namespace for anonymity-sensitive traffic (peers, trackers, DHT).
+    #[arg(long = "netns-anon", env = "RQBIT_NETNS_ANON")]
+    netns_anon: Option<String>,
+
 }
 
 #[derive(Parser)]
@@ -498,11 +506,8 @@ fn main() -> anyhow::Result<()> {
     let rt = rt_builder
         .enable_time()
         .enable_io()
-        // the default is 512, it can get out of hand, as this program is CPU-bound on
-        // hash checking.
-        // note: we aren't using spawn_blocking() anymore, so this doesn't apply,
-        // however I'm still messing around, so in case we do, let's block the number of
-        // spawned threads.
+        // In netns mode we create sockets via spawn_blocking to keep setns thread-local and async-safe.
+        // Keep this large enough to avoid starving metadata/peer connection attempts.
         .max_blocking_threads(opts.max_blocking_threads as usize)
         .build()?;
 
@@ -588,6 +593,53 @@ async fn async_main(mut opts: Opts, cancel: CancellationToken) -> anyhow::Result
         Default::default()
     };
 
+    #[cfg(target_os = "linux")]
+    let resolved_netns_anon_name = opts.netns_anon.clone();
+    #[cfg(target_os = "linux")]
+    let resolved_netns_anon = match opts.netns_anon.take() {
+        Some(name) => {
+            Some(Arc::new(NetNs::get(&name).with_context(|| {
+                format!("namespace {name:?} from --netns-anon was not found")
+            })?))
+        }
+        None => None,
+    };
+    #[cfg(not(target_os = "linux"))]
+    let resolved_netns_anon_name = opts.netns_anon.clone();
+    #[cfg(not(target_os = "linux"))]
+    let resolved_netns_anon = {
+        if opts.netns_anon.is_some() {
+            anyhow::bail!("--netns-anon is supported only on Linux")
+        }
+        None
+    };
+
+    if resolved_netns_anon.is_some() && !opts.disable_local_peer_discovery {
+        warn!(
+            "LSD is LAN multicast and not an anonymity feature; with --netns-anon enabled, consider using --disable-lsd or setting --netns-local"
+        );
+    }
+
+    if resolved_netns_anon.is_some() && opts.bind_device_name.is_none() {
+        warn!(
+            "WARNING: --netns-anon is set but --bind-device is not. \
+            Tracker HTTP and peer TCP connections may leak your real IP. \
+            Use --bind-device <interface> (e.g., wg0) to force all lazy sockets through the tunnel"
+        );
+    }
+
+    if resolved_netns_anon.is_some() && opts.max_blocking_threads < 32 {
+        warn!(
+            max_blocking_threads = opts.max_blocking_threads,
+            "--netns-anon with low blocking thread count can make magnet metadata resolution slow or time out; consider --max-blocking-threads 64"
+        );
+    }
+
+    info!(
+        netns_anon = resolved_netns_anon_name.as_deref().unwrap_or("default"),
+        "configured network namespaces"
+    );
+
     let listen_mode = match (!opts.disable_tcp_listen, opts.enable_utp_listen) {
         (true, false) => Some(ListenerMode::TcpOnly),
         (false, true) => Some(ListenerMode::UtpOnly),
@@ -662,6 +714,8 @@ async fn async_main(mut opts: Opts, cancel: CancellationToken) -> anyhow::Result
         peer_limit: opts.peer_limit,
         runtime_worker_threads: Some(opts.max_blocking_threads as usize),
         ipv4_only: opts.ipv4_only,
+        #[cfg(target_os = "linux")]
+        netns_anon: resolved_netns_anon,
     };
 
     #[allow(clippy::needless_update)]

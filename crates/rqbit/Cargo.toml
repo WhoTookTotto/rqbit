@@ -60,6 +60,7 @@ tokio-util.workspace = true
 gethostname.workspace = true
 url.workspace = true
 librqbit-dualstack-sockets.workspace = true
+netns-rs = "0.2.0"
 
 [dev-dependencies]
 futures.workspace = true

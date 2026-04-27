@@ -5,7 +5,8 @@ use std::{
 
 use anyhow::Context;
 use librqbit_dualstack_sockets::{BindOpts, TcpListener};
-use librqbit_utp::{BindDevice, UtpSocketUdp, UtpSocketUdpOpts};
+use librqbit_dualstack_sockets::UdpSocket as DsUdpSocket;
+use librqbit_utp::{BindDevice, UtpSocket, UtpSocketUdp, UtpSocketUdpOpts};
 use tokio::io::AsyncWrite;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -53,6 +54,9 @@ pub struct ListenerOptions {
     pub utp_opts: Option<librqbit_utp::SocketOpts>,
     pub announce_port: Option<u16>,
     pub ipv4_only: bool,
+    /// If set, TCP and uTP sockets are created inside this network namespace.
+    #[cfg(target_os = "linux")]
+    pub netns: Option<Arc<crate::netns_util::NetNs>>,
 }
 
 impl Default for ListenerOptions {
@@ -65,6 +69,8 @@ impl Default for ListenerOptions {
             utp_opts: None,
             announce_port: None,
             ipv4_only: false,
+            #[cfg(target_os = "linux")]
+            netns: None,
         }
     }
 }
@@ -76,6 +82,9 @@ impl ListenerOptions {
         cancellation_token: CancellationToken,
         bind_device: Option<&BindDevice>,
     ) -> anyhow::Result<ListenResult> {
+        #[cfg(target_os = "linux")]
+        let netns = self.netns.take();
+
         let mut utp_opts = self.utp_opts.take().unwrap_or_default();
         utp_opts.cancellation_token = cancellation_token.clone();
         utp_opts.parent_span = parent_span;
@@ -93,15 +102,40 @@ impl ListenerOptions {
         };
 
         let tcp_socket = if self.mode.tcp_enabled() {
-            let listener = TcpListener::bind_tcp(
-                listen_addr,
-                BindOpts {
-                    request_dualstack: !self.ipv4_only,
-                    reuseport: false,
-                    device: bind_device,
-                },
-            )
-            .context("error starting TCP listener")?;
+            let listener = {
+                let dualstack = !self.ipv4_only;
+                #[cfg(target_os = "linux")]
+                {
+                    if netns.is_some() {
+                        let ns_ref = netns.as_ref();
+                        let listen_addr_c = listen_addr;
+                        crate::netns_util::run_in_netns(ns_ref, move || {
+                            TcpListener::bind_tcp(
+                                listen_addr_c,
+                                BindOpts { request_dualstack: dualstack, reuseport: false, device: None },
+                            )
+                            .context("error starting TCP listener")
+                        })
+                        .await?
+                    } else {
+                        TcpListener::bind_tcp(
+                            listen_addr,
+                            BindOpts {
+                                request_dualstack: dualstack,
+                                reuseport: false,
+                                device: bind_device,
+                            },
+                        )
+                        .context("error starting TCP listener")?
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
+                TcpListener::bind_tcp(
+                    listen_addr,
+                    BindOpts { request_dualstack: dualstack, reuseport: false, device: bind_device },
+                )
+                .context("error starting TCP listener")?
+            };
             listen_addr = listener.bind_addr();
             info!(
                 "Listening on TCP {:?} for incoming peer connections",
@@ -113,12 +147,47 @@ impl ListenerOptions {
         };
 
         let utp_socket = if self.mode.utp_enabled() {
-            let bind_result = UtpSocketUdp::new_udp_with_opts(
-                listen_addr,
-                utp_opts,
-                UtpSocketUdpOpts { bind_device },
-            )
-            .await;
+            let bind_result: Result<Arc<UtpSocketUdp>, anyhow::Error> = {
+                #[cfg(target_os = "linux")]
+                {
+                    if let Some(ref ns) = netns {
+                        // Pre-create the raw UDP socket in the namespace (synchronous bind_udp),
+                        // then hand it to UtpSocket::new_with_opts (also synchronous).
+                        let ns = ns.clone();
+                        let listen_addr_c = listen_addr;
+                        let udp_sock = tokio::task::spawn_blocking(move || {
+                            ns.run(|_| {
+                                DsUdpSocket::bind_udp(
+                                    listen_addr_c,
+                                    BindOpts { request_dualstack: true, reuseport: false, device: None },
+                                )
+                                .map_err(|e| anyhow::anyhow!("uTP udp bind failed: {e}"))
+                            })
+                            .map_err(|e| anyhow::anyhow!("netns enter failed: {e}"))?
+                        })
+                        .await
+                        .map_err(|e| anyhow::anyhow!("spawn_blocking panicked: {e}"))??;
+                        UtpSocket::new_with_opts(udp_sock, Default::default(), utp_opts)
+                            .map_err(anyhow::Error::from)
+                    } else {
+                        UtpSocketUdp::new_udp_with_opts(
+                            listen_addr,
+                            utp_opts,
+                            UtpSocketUdpOpts { bind_device },
+                        )
+                        .await
+                        .map_err(anyhow::Error::from)
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
+                UtpSocketUdp::new_udp_with_opts(
+                    listen_addr,
+                    utp_opts,
+                    UtpSocketUdpOpts { bind_device },
+                )
+                .await
+                .map_err(anyhow::Error::from)
+            };
             match bind_result {
                 Ok(sock) => {
                     listen_addr = sock.bind_addr();
