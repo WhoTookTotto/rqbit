@@ -3,6 +3,7 @@ import { TorrentDetails, TorrentStats } from "../api-types";
 import { FormCheckbox } from "./forms/FormCheckbox";
 import { CiSquarePlus, CiSquareMinus } from "react-icons/ci";
 import { IconButton } from "./buttons/IconButton";
+import { FaTrash } from "react-icons/fa";
 import { formatBytes } from "../helper/formatBytes";
 import { ProgressBar } from "./ProgressBar";
 import sortBy from "lodash.sortby";
@@ -102,6 +103,7 @@ const FileTreeComponent: React.FC<{
   showProgressBar?: boolean;
   disabled?: boolean;
   allowStream?: boolean;
+  onDeleteFile?: (fileId: number) => void;
 }> = ({
   torrentId,
   tree,
@@ -113,6 +115,7 @@ const FileTreeComponent: React.FC<{
   showProgressBar,
   disabled,
   allowStream,
+  onDeleteFile,
 }) => {
   const API = useContext(APIContext);
   let [expanded, setExpanded] = useState(initialExpanded);
@@ -198,6 +201,7 @@ const FileTreeComponent: React.FC<{
             showProgressBar={showProgressBar}
             disabled={disabled}
             allowStream={allowStream}
+            onDeleteFile={onDeleteFile}
           />
         ))}
         <div className="pl-1">
@@ -217,7 +221,18 @@ const FileTreeComponent: React.FC<{
                 disabled={disabled}
                 onChange={() => handleToggleFile(file.id)}
                 labelLink={fileLink(file)}
-              ></FormCheckbox>
+              >
+                {onDeleteFile && (
+                  <IconButton
+                    onClick={() => onDeleteFile(file.id)}
+                    disabled={disabled}
+                    title="Delete file from disk and exclude it"
+                    className="text-red-500 hover:text-red-600"
+                  >
+                    <FaTrash />
+                  </IconButton>
+                )}
+              </FormCheckbox>
               {showProgressBar && (
                 <ProgressBar
                   now={(file.have_bytes / file.length) * 100}
@@ -241,6 +256,7 @@ export const FileListInput: React.FC<{
   showProgressBar?: boolean;
   disabled?: boolean;
   allowStream?: boolean;
+  onDeleteFile?: (fileId: number) => void;
 }> = ({
   torrentId,
   torrentDetails,
@@ -250,6 +266,7 @@ export const FileListInput: React.FC<{
   showProgressBar,
   disabled,
   allowStream,
+  onDeleteFile,
 }) => {
   let fileTree = useMemo(
     () => newFileTree(torrentDetails, torrentStats),
@@ -268,6 +285,7 @@ export const FileListInput: React.FC<{
       showProgressBar={showProgressBar}
       disabled={disabled}
       allowStream={allowStream}
+      onDeleteFile={onDeleteFile}
     />
   );
 };

@@ -2,6 +2,7 @@ import { TorrentListItem, STATE_INITIALIZING } from "../../api-types";
 import { StatusIcon } from "../StatusIcon";
 import { formatBytes } from "../../helper/formatBytes";
 import { getCompletionETA } from "../../helper/getCompletionETA";
+import { getTorrentProgressPercentage } from "../../helper/getTorrentProgressPercentage";
 import { memo } from "react";
 
 interface TorrentTableRowProps {
@@ -25,11 +26,7 @@ const TorrentTableRowUnmemoized: React.FC<TorrentTableRowProps> = ({
   const finished = stats?.finished || false;
   const live = !!stats?.live;
 
-  const progressPercentage = error
-    ? 100
-    : totalBytes === 0
-      ? 100
-      : Math.round((progressBytes / totalBytes) * 100);
+  const progressPercentage = Math.round(getTorrentProgressPercentage(stats));
 
   const downloadSpeed = stats?.live?.download_speed?.human_readable ?? "-";
   const uploadSpeed = stats?.live?.upload_speed?.human_readable ?? "-";

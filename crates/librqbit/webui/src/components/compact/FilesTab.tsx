@@ -19,6 +19,7 @@ export const FilesTab: React.FC<FilesTabProps> = ({
 }) => {
   const [selectedFiles, setSelectedFiles] = useState<Set<number>>(new Set());
   const [savingSelectedFiles, setSavingSelectedFiles] = useState(false);
+  const [deletingFile, setDeletingFile] = useState<number | null>(null);
 
   const API = useContext(APIContext);
   const setCloseableError = useErrorStore((state) => state.setCloseableError);
@@ -52,6 +53,33 @@ export const FilesTab: React.FC<FilesTabProps> = ({
       .finally(() => setSavingSelectedFiles(false));
   };
 
+  const handleDeleteFile = (fileId: number) => {
+    const fileName = detailsResponse?.files[fileId]?.name ?? "this file";
+    const confirmed = window.confirm(
+      `Delete ${fileName} from disk and exclude it from the torrent?`,
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setDeletingFile(fileId);
+    API.deleteFiles(torrentId, [fileId])
+      .then(
+        () => {
+          onRefresh?.();
+          setCloseableError(null);
+        },
+        (e) => {
+          setCloseableError({
+            text: "Error deleting file from torrent",
+            details: e as ErrorDetails,
+          });
+        },
+      )
+      .finally(() => setDeletingFile(null));
+  };
+
   if (!detailsResponse) {
     return <div className="p-4 text-tertiary">Loading...</div>;
   }
@@ -64,9 +92,10 @@ export const FilesTab: React.FC<FilesTabProps> = ({
         torrentStats={statsResponse}
         selectedFiles={selectedFiles}
         setSelectedFiles={updateSelectedFiles}
-        disabled={savingSelectedFiles}
+        disabled={savingSelectedFiles || deletingFile !== null}
         allowStream
         showProgressBar
+        onDeleteFile={handleDeleteFile}
       />
     </div>
   );

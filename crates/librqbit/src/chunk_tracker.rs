@@ -281,6 +281,29 @@ impl ChunkTracker {
         }
     }
 
+    pub fn mark_files_missing(&mut self, file_infos: &FileInfos, file_ids: &HashSet<usize>) {
+        let pieces_to_clear: HashSet<_> = file_ids
+            .iter()
+            .filter_map(|file_id| file_infos.get(*file_id))
+            .flat_map(|file_info| file_info.piece_range_usize())
+            .collect();
+
+        for piece_id in pieces_to_clear {
+            self.have.as_slice_mut().set(piece_id, false);
+            self.queue_pieces.set(piece_id, self.selected[piece_id]);
+
+            if let Some(piece_index) = self.lengths.validate_piece_index(piece_id as u32)
+                && let Some(chunk_status) =
+                    self.chunk_status.get_mut(self.lengths.chunk_range(piece_index))
+            {
+                chunk_status.fill(false);
+            }
+        }
+
+        self.recalculate_per_file_bytes(file_infos);
+        self.hns = self.calc_hns();
+    }
+
     pub fn is_chunk_ready_to_upload(&self, chunk: &ChunkInfo) -> bool {
         self.have
             .as_slice()
@@ -665,5 +688,70 @@ mod tests {
         assert!(ct.queue_pieces[0]);
         assert!(ct.queue_pieces[1]);
         assert!(ct.queue_pieces[2]);
+    }
+
+    #[test]
+    fn test_mark_files_missing_allows_reselect_after_delete() {
+        let piece_len = CHUNK_SIZE * 2 + 1;
+        let total_len = piece_len as u64 * 2 + 1;
+        let l = Lengths::new(total_len, piece_len).unwrap();
+
+        let all_files = vec![
+            FileInfo {
+                relative_filename: "0".into(),
+                offset_in_torrent: 0,
+                piece_range: 0..1,
+                len: piece_len as u64,
+                attrs: Default::default(),
+            },
+            FileInfo {
+                relative_filename: "1".into(),
+                offset_in_torrent: piece_len as u64,
+                piece_range: 1..2,
+                len: 1,
+                attrs: Default::default(),
+            },
+            FileInfo {
+                relative_filename: "2".into(),
+                offset_in_torrent: piece_len as u64 + 1,
+                piece_range: 1..1,
+                len: 0,
+                attrs: Default::default(),
+            },
+            FileInfo {
+                relative_filename: "3".into(),
+                offset_in_torrent: piece_len as u64 + 1,
+                piece_range: 1..3,
+                len: piece_len as u64,
+                attrs: Default::default(),
+            },
+        ];
+
+        let mut initial_have = BF::from_boxed_slice(
+            vec![0u8; l.piece_bitfield_bytes()].into_boxed_slice(),
+        );
+        initial_have.get_mut(0..3).unwrap().fill(true);
+
+        let mut initial_selected = BF::from_boxed_slice(
+            vec![0u8; l.piece_bitfield_bytes()].into_boxed_slice(),
+        );
+        initial_selected.get_mut(0..3).unwrap().fill(true);
+
+        let mut ct = ChunkTracker::new(initial_have.into_dyn(), initial_selected, l, &all_files).unwrap();
+
+        ct.update_only_files(&all_files, &HashSet::from_iter([1, 2, 3]))
+            .unwrap();
+        ct.mark_files_missing(&all_files, &HashSet::from_iter([0]));
+
+        assert!(!ct.have.as_slice()[0]);
+        assert!(!ct.queue_pieces[0]);
+
+        let hns = ct
+            .update_only_files(&all_files, &HashSet::from_iter([0, 1, 2, 3]))
+            .unwrap();
+
+        assert!(ct.queue_pieces[0]);
+        assert_eq!(hns.needed_bytes, all_files[0].len);
+        assert_eq!(hns.progress(), total_len - all_files[0].len);
     }
 }

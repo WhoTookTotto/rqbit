@@ -46,6 +46,7 @@ async fn h_api_root(parts: Parts) -> impl IntoResponse {
             "GET /stats": "Global session stats",
             "GET /metrics": "Prometheus metrics",
             "GET /stream_logs": "Continuously stream logs",
+            "GET /torrent_search/{website}/{query}/{page?}": "Proxy a local torrent search source for the web UI",
             "GET /web/": "Web UI",
             "GET /torrents/playlist": "Playlist for supported players",
             "GET /torrents/{id_or_infohash}": "Torrent details",
@@ -80,6 +81,14 @@ pub fn make_api_router(state: ApiState) -> Router {
         .route("/", get(h_api_root))
         .route("/stream_logs", get(logging::h_stream_logs))
         .route("/rust_log", post(logging::h_set_rust_log))
+        .route(
+            "/torrent_search/{website}/{query}",
+            get(other::h_torrent_search),
+        )
+        .route(
+            "/torrent_search/{website}/{query}/{page}",
+            get(other::h_torrent_search_with_page),
+        )
         .route("/dht/stats", get(dht::h_dht_stats))
         .route("/dht/table", get(dht::h_dht_table))
         .route("/stats", get(torrents::h_session_stats))
@@ -133,6 +142,10 @@ pub fn make_api_router(state: ApiState) -> Router {
             .route(
                 "/torrents/{id}/update_only_files",
                 post(torrents::h_torrent_action_update_only_files),
+            )
+            .route(
+                "/torrents/{id}/delete_files",
+                post(torrents::h_torrent_action_delete_files),
             )
             .route("/torrents/{id}/add_peers", post(torrents::h_add_peers))
             .route("/torrents/create", post(torrents::h_create_torrent));

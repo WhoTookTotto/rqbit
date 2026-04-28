@@ -54,7 +54,13 @@ impl JsonSessionPersistenceStore {
                 let mut rdr = tokio::io::BufReader::new(f);
                 rdr.read_to_end(&mut buf).await?;
 
-                serde_json::from_reader(&buf[..]).context("error deserializing session database")?
+                if buf.iter().all(u8::is_ascii_whitespace) {
+                    warn!(file=?db_filename, "session database was empty, starting with a blank session store");
+                    Default::default()
+                } else {
+                    serde_json::from_reader(&buf[..])
+                        .context("error deserializing session database")?
+                }
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
             Err(e) => {

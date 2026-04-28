@@ -6,6 +6,8 @@ import {
   PeerStatsSnapshot,
   RqbitAPI,
   SessionStats,
+  TorrentSearchResult,
+  TorrentSearchSource,
   TorrentDetails,
   TorrentStats,
 } from "./api-types";
@@ -105,6 +107,19 @@ const makeRequest = async (
 
 export const API: RqbitAPI & { getVersion: () => Promise<string> } = {
   getStreamLogsUrl: () => apiUrl + "/stream_logs",
+  searchTorrents: (
+    source: TorrentSearchSource,
+    query: string,
+    page?: number,
+  ): Promise<TorrentSearchResult[]> => {
+    const encodedSource = encodeURIComponent(source);
+    const encodedQuery = encodeURIComponent(query);
+    const pageSuffix = page != null ? `/${page}` : "";
+    return makeRequest(
+      "GET",
+      `/torrent_search/${encodedSource}/${encodedQuery}${pageSuffix}`,
+    );
+  },
   listTorrents: (opts?: {
     withStats?: boolean;
   }): Promise<ListTorrentsResponse> => {
@@ -157,6 +172,17 @@ export const API: RqbitAPI & { getVersion: () => Promise<string> } = {
       url,
       {
         only_files: files,
+      },
+      true,
+    );
+  },
+
+  deleteFiles: (index: number, fileIds: number[]): Promise<void> => {
+    return makeRequest(
+      "POST",
+      `/torrents/${index}/delete_files`,
+      {
+        file_ids: fileIds,
       },
       true,
     );

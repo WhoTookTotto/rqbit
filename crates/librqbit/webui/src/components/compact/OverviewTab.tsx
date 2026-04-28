@@ -6,6 +6,7 @@ import {
 } from "../../api-types";
 import { formatBytes } from "../../helper/formatBytes";
 import { getCompletionETA } from "../../helper/getCompletionETA";
+import { getTorrentProgressPercentage } from "../../helper/getTorrentProgressPercentage";
 import { PiecesCanvas } from "./PiecesCanvas";
 
 interface OverviewTabProps {
@@ -46,11 +47,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ torrent }) => {
 
   const totalUploadedBytes = statsResponse.live?.snapshot.uploaded_bytes ?? 0;
 
-  const progressPct = error
-    ? 100
-    : totalBytes === 0
-      ? 100
-      : (progressBytes / totalBytes) * 100;
+  const progressPct = getTorrentProgressPercentage(statsResponse);
 
   const downSpeed = statsResponse.live?.download_speed?.human_readable ?? "-";
   const upSpeed = statsResponse.live?.upload_speed?.human_readable ?? "-";

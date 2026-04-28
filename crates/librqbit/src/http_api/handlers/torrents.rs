@@ -236,6 +236,11 @@ pub struct UpdateOnlyFilesRequest {
     only_files: Vec<usize>,
 }
 
+#[derive(Deserialize)]
+pub struct DeleteFilesRequest {
+    file_ids: Vec<usize>,
+}
+
 pub async fn h_torrent_action_update_only_files(
     State(state): State<ApiState>,
     Path(idx): Path<TorrentIdOrHash>,
@@ -244,6 +249,18 @@ pub async fn h_torrent_action_update_only_files(
     state
         .api
         .api_torrent_action_update_only_files(idx, &req.only_files.into_iter().collect())
+        .await
+        .map(axum::Json)
+}
+
+pub async fn h_torrent_action_delete_files(
+    State(state): State<ApiState>,
+    Path(idx): Path<TorrentIdOrHash>,
+    axum::Json(req): axum::Json<DeleteFilesRequest>,
+) -> Result<impl IntoResponse> {
+    state
+        .api
+        .api_torrent_action_delete_files(idx, &req.file_ids.into_iter().collect())
         .await
         .map(axum::Json)
 }

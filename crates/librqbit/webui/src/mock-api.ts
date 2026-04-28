@@ -8,6 +8,8 @@ import {
   PeerStatsSnapshot,
   RqbitAPI,
   SessionStats,
+  TorrentSearchResult,
+  TorrentSearchSource,
   TorrentDetails,
   TorrentStats,
   TorrentListItem,
@@ -395,6 +397,31 @@ const TOTAL_TORRENTS = 1000;
 export const MockAPI: RqbitAPI & { getVersion: () => Promise<string> } = {
   getStreamLogsUrl: () => null,
 
+  searchTorrents: async (
+    source: TorrentSearchSource,
+    query: string,
+    page = 1,
+  ): Promise<TorrentSearchResult[]> => {
+    await new Promise((r) => setTimeout(r, 120));
+
+    const trimmed = query.trim();
+    if (!trimmed) {
+      return [];
+    }
+
+    return Array.from({ length: 8 }, (_, index) => ({
+      Name: `${trimmed} Result ${index + 1 + (page - 1) * 8}`,
+      Size: `${1 + ((index + page) % 5)}.${index} GiB`,
+      DateUploaded: `04-${String(index + 10).padStart(2, "0")} 2026`,
+      Category: source,
+      Seeders: String(200 - index * 7),
+      Leechers: String(40 + index * 3),
+      UploadedBy: `mock-${source}`,
+      Url: `https://example.com/${source}/${encodeURIComponent(trimmed)}/${page}/${index}`,
+      Magnet: `magnet:?xt=urn:btih:MOCK${source.toUpperCase()}${page}${index}&dn=${encodeURIComponent(trimmed)}`,
+    }));
+  },
+
   listTorrents: async (opts?: {
     withStats?: boolean;
   }): Promise<ListTorrentsResponse> => {
@@ -534,6 +561,10 @@ export const MockAPI: RqbitAPI & { getVersion: () => Promise<string> } = {
   },
 
   updateOnlyFiles: async (): Promise<void> => {
+    await new Promise((r) => setTimeout(r, 100));
+  },
+
+  deleteFiles: async (): Promise<void> => {
     await new Promise((r) => setTimeout(r, 100));
   },
 

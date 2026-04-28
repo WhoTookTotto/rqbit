@@ -5,6 +5,7 @@ import { ProgressBar } from "./ProgressBar";
 import { Speed } from "./Speed";
 import { formatBytes } from "../helper/formatBytes";
 import { getCompletionETA } from "../helper/getCompletionETA";
+import { getTorrentProgressPercentage } from "../helper/getTorrentProgressPercentage";
 import { StatusIcon } from "./StatusIcon";
 
 export const TorrentCardContent: React.FC<{
@@ -17,11 +18,7 @@ export const TorrentCardContent: React.FC<{
   const totalBytes = statsResponse?.total_bytes ?? 1;
   const progressBytes = statsResponse?.progress_bytes ?? 0;
   const finished = statsResponse?.finished || false;
-  const progressPercentage = error
-    ? 100
-    : totalBytes == 0
-      ? 100
-      : (progressBytes / totalBytes) * 100;
+  const progressPercentage = getTorrentProgressPercentage(statsResponse);
 
   const formatPeersString = () => {
     let peer_stats = statsResponse?.live?.snapshot.peer_stats;

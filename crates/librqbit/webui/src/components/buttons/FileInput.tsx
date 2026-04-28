@@ -1,14 +1,17 @@
 import { RefObject, useContext, useRef, useState } from "react";
 import { UploadButton } from "./UploadButton";
-import { CgFileAdd } from "react-icons/cg";
+import { CgFileAdd, CgFolder } from "react-icons/cg";
 import { APIContext } from "../../context";
 import { useTorrentStore } from "../../stores/torrentStore";
+import { Button } from "./Button";
+import { BrowseTorrentsModal } from "../modal/BrowseTorrentsModal";
 
 export const FileInput = ({ className }: { className?: string }) => {
   const inputRef = useRef<HTMLInputElement>(
     null,
   ) as RefObject<HTMLInputElement>;
   const [file, setFile] = useState<File | null>(null);
+  const [browseModalOpen, setBrowseModalOpen] = useState(false);
 
   const API = useContext(APIContext);
 
@@ -55,7 +58,7 @@ export const FileInput = ({ className }: { className?: string }) => {
   };
 
   return (
-    <>
+    <div className={`flex flex-wrap items-center gap-1 ${className ?? ""}`}>
       <input
         type="file"
         ref={inputRef}
@@ -68,11 +71,21 @@ export const FileInput = ({ className }: { className?: string }) => {
         onClick={onClick}
         data={file}
         resetData={reset}
-        className={`group ${className}`}
+        className="group justify-center"
       >
         <CgFileAdd className="text-blue-500 group-hover:text-white dark:text-white" />
-        <div>Upload .torrent File</div>
+        <div>Upload File</div>
       </UploadButton>
-    </>
+
+      <Button onClick={() => setBrowseModalOpen(true)} className="group justify-center">
+        <CgFolder className="text-blue-500 group-hover:text-white dark:text-white" />
+        <div>Browse Torrents</div>
+      </Button>
+
+      <BrowseTorrentsModal
+        isOpen={browseModalOpen}
+        onClose={() => setBrowseModalOpen(false)}
+      />
+    </div>
   );
 };

@@ -347,6 +347,19 @@ impl Api {
         Ok(Default::default())
     }
 
+    pub async fn api_torrent_action_delete_files(
+        &self,
+        idx: TorrentIdOrHash,
+        file_ids: &HashSet<usize>,
+    ) -> Result<EmptyJsonResponse> {
+        let handle = self.mgr_handle(idx)?;
+        self.session
+            .delete_files(&handle, file_ids)
+            .await
+            .context("error deleting files from torrent")?;
+        Ok(Default::default())
+    }
+
     pub fn api_set_rust_log(&self, new_value: String) -> Result<EmptyJsonResponse> {
         let tx = self
             .rust_log_reload_tx

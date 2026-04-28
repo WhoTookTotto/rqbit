@@ -1705,6 +1705,87 @@ impl Session {
         Ok(())
     }
 
+    pub async fn delete_files(
+        self: &Arc<Self>,
+        handle: &ManagedTorrentHandle,
+        file_ids: &HashSet<usize>,
+    ) -> anyhow::Result<()> {
+        let metadata = handle.with_metadata(Arc::clone)?;
+        let file_count = metadata.file_infos.len();
+
+        if file_ids.is_empty() {
+            bail!("file_ids should contain at least one file id");
+        }
+
+        for file_id in file_ids.iter().copied() {
+            if file_id >= file_count {
+                bail!("file_ids contains invalid value {file_id}");
+            }
+
+            if metadata.file_infos[file_id].attrs.padding {
+                bail!("cannot delete padding file {file_id}");
+            }
+        }
+
+        let mut next_only_files = handle.only_files().map(HashSet::from_iter).unwrap_or_else(|| {
+            metadata
+                .file_infos
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, file_info)| (!file_info.attrs.padding).then_some(idx))
+                .collect()
+        });
+
+        for file_id in file_ids.iter().copied() {
+            next_only_files.remove(&file_id);
+        }
+
+        let was_live = handle.live().is_some();
+        if was_live {
+            self.pause(handle).await?;
+        }
+
+        let delete_result = async {
+            self.update_only_files(handle, &next_only_files).await?;
+
+            handle.with_state_mut(|state| -> anyhow::Result<()> {
+                match state {
+                    ManagedTorrentState::Paused(paused) => {
+                        let deleted_file_ids =
+                            remove_file_ids_and_dirs(&metadata.file_infos, &*paused.files, file_ids);
+                        paused.mark_files_missing(&deleted_file_ids);
+                        Ok(())
+                    }
+                    ManagedTorrentState::Initializing(_) => {
+                        bail!("torrent is initializing, can't delete files")
+                    }
+                    ManagedTorrentState::Live(_) => {
+                        bail!("bug: torrent should be paused before deleting files")
+                    }
+                    ManagedTorrentState::Error(_) => {
+                        bail!("can't delete files from torrent in error state")
+                    }
+                    ManagedTorrentState::None => bail!("bug: torrent is in empty state"),
+                }
+            })
+        }
+        .await;
+
+        if was_live {
+            match (delete_result, self.unpause(handle).await) {
+                (Ok(()), Ok(())) => Ok(()),
+                (Err(delete_error), Ok(())) => Err(delete_error),
+                (Ok(()), Err(resume_error)) => {
+                    Err(resume_error).context("deleted files but failed to resume torrent")
+                }
+                (Err(delete_error), Err(resume_error)) => Err(delete_error)
+                    .context(format!("also failed to resume torrent: {resume_error:#}")),
+            }
+        } else {
+            delete_result
+        }
+    }
+
     pub fn listen_addr(&self) -> Option<SocketAddr> {
         self.listen_addr
     }
@@ -1808,16 +1889,22 @@ pub(crate) struct ResolveMagnetResult {
     pub seen_peers: Vec<SocketAddr>,
 }
 
-fn remove_files_and_dirs(infos: &FileInfos, files: &dyn TorrentStorage) {
+fn remove_file_ids_and_dirs(
+    infos: &FileInfos,
+    files: &dyn TorrentStorage,
+    file_ids: &HashSet<usize>,
+) -> HashSet<usize> {
     let mut all_dirs = HashSet::new();
+    let mut deleted_file_ids = HashSet::new();
     for (id, fi) in infos.iter().enumerate() {
-        if fi.attrs.padding {
+        if fi.attrs.padding || !file_ids.contains(&id) {
             continue;
         }
         let mut fname = &*fi.relative_filename;
         if let Err(e) = files.remove_file(id, fname) {
             warn!(?fi.relative_filename, error=?e, "could not delete file");
         } else {
+            deleted_file_ids.insert(id);
             debug!(?fi.relative_filename, "deleted the file")
         }
         while let Some(parent) = fname.parent() {
@@ -1840,6 +1927,17 @@ fn remove_files_and_dirs(infos: &FileInfos, files: &dyn TorrentStorage) {
             debug!("removed {dir:?}")
         }
     }
+
+    deleted_file_ids
+}
+
+fn remove_files_and_dirs(infos: &FileInfos, files: &dyn TorrentStorage) {
+    let file_ids = infos
+        .iter()
+        .enumerate()
+        .filter_map(|(id, fi)| (!fi.attrs.padding).then_some(id))
+        .collect();
+    let _ = remove_file_ids_and_dirs(infos, files, &file_ids);
 }
 
 // Ad adapter for converting stats into the format that tracker_comms accepts.

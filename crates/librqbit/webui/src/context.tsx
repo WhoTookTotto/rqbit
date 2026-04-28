@@ -2,6 +2,9 @@ import { createContext } from "react";
 import { LimitsConfig, RqbitAPI, SessionStats } from "./api-types";
 
 export const APIContext = createContext<RqbitAPI>({
+  searchTorrents: () => {
+    throw new Error("Function not implemented.");
+  },
   listTorrents: () => {
     throw new Error("Function not implemented.");
   },
@@ -18,6 +21,9 @@ export const APIContext = createContext<RqbitAPI>({
     throw new Error("Function not implemented.");
   },
   updateOnlyFiles: () => {
+    throw new Error("Function not implemented.");
+  },
+  deleteFiles: () => {
     throw new Error("Function not implemented.");
   },
   pause: () => {

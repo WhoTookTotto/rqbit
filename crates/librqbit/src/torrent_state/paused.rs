@@ -22,6 +22,11 @@ impl TorrentStatePaused {
         Ok(())
     }
 
+    pub(crate) fn mark_files_missing(&mut self, file_ids: &HashSet<usize>) {
+        self.chunk_tracker
+            .mark_files_missing(&self.metadata.file_infos, file_ids);
+    }
+
     pub(crate) fn hns(&self) -> &HaveNeededSelected {
         self.chunk_tracker.get_hns()
     }

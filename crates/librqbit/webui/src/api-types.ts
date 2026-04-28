@@ -127,6 +127,26 @@ export interface LimitsConfig {
   download_bps?: number | null;
 }
 
+export type TorrentSearchSource =
+  | "piratebay"
+  | "rargb"
+  | "ettv"
+  | "zooqle"
+  | "kickass"
+  | "torrentproject";
+
+export interface TorrentSearchResult {
+  Name: string;
+  Size: string;
+  DateUploaded: string;
+  Category: string;
+  Seeders: string;
+  Leechers: string;
+  UploadedBy: string;
+  Url: string;
+  Magnet: string;
+}
+
 // Interface for the Torrent Stats API response
 export interface LiveTorrentStats {
   snapshot: {
@@ -250,6 +270,11 @@ export interface JSONLogLine {
 export interface RqbitAPI {
   getPlaylistUrl: (index: number) => string | null;
   getStreamLogsUrl: () => string | null;
+  searchTorrents: (
+    source: TorrentSearchSource,
+    query: string,
+    page?: number,
+  ) => Promise<TorrentSearchResult[]>;
   listTorrents: (opts?: {
     withStats?: boolean;
   }) => Promise<ListTorrentsResponse>;
@@ -268,6 +293,7 @@ export interface RqbitAPI {
   ) => Promise<AddTorrentResponse>;
 
   pause: (index: number) => Promise<void>;
+  deleteFiles: (index: number, fileIds: number[]) => Promise<void>;
   updateOnlyFiles: (index: number, files: number[]) => Promise<void>;
   start: (index: number) => Promise<void>;
   forget: (index: number) => Promise<void>;
